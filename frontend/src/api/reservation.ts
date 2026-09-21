@@ -1,4 +1,4 @@
-import { get, post } from '@/utils/request'
+import { get, post, put } from '@/utils/request'
 
 export interface Reservation {
   id: number
@@ -28,4 +28,12 @@ export function cancelReservation(id: number) {
 
 export function checkInReservation(id: number) {
   return post<Reservation>(`/reservations/${id}/checkin`)
+}
+
+// 改约：先释放原时段再占用新时段；station_id 省略表示不改机位。
+export function rescheduleReservation(
+  id: number,
+  data: { station_id?: number; start_time: string; end_time: string; remark?: string },
+) {
+  return put<Reservation>(`/reservations/${id}/reschedule`, data)
 }

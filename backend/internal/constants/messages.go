@@ -14,6 +14,7 @@ const (
 	MsgBuyPackageOK = "时长包购买成功"
 	MsgReserveOK    = "预约成功"
 	MsgCheckInOK    = "开机成功"
+	MsgRescheduleOK = "改约成功"
 	MsgRenewOK      = "续费成功"
 	MsgCheckoutOK   = "下机成功"
 	MsgDrawOK       = "抽签分组完成"

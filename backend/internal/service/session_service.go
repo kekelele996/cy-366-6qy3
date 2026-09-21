@@ -17,26 +17,37 @@ import (
 
 // SessionService 上机记录服务（含排行榜）。
 type SessionService struct {
-	sessionRepo     *repository.SessionRepository
-	stationService  *StationService
-	userPkgRepo     *repository.UserPackageRepository
-	userRepo        *repository.UserRepository
-	reservationRepo *repository.ReservationRepository
-	db              *gorm.DB
-	logger          *slog.Logger
+	sessionRepo        *repository.SessionRepository
+	stationService     *StationService
+	reservationService *ReservationService
+	userPkgRepo        *repository.UserPackageRepository
+	userRepo           *repository.UserRepository
+	reservationRepo    *repository.ReservationRepository
+	db                 *gorm.DB
+	logger             *slog.Logger
 }
 
 // NewSessionService 构造上机记录服务。
 func NewSessionService(
 	sessionRepo *repository.SessionRepository,
 	stationService *StationService,
+	reservationService *ReservationService,
 	userPkgRepo *repository.UserPackageRepository,
 	userRepo *repository.UserRepository,
 	reservationRepo *repository.ReservationRepository,
 	db *gorm.DB,
 	logger *slog.Logger,
 ) *SessionService {
-	return &SessionService{sessionRepo: sessionRepo, stationService: stationService, userPkgRepo: userPkgRepo, userRepo: userRepo, reservationRepo: reservationRepo, db: db, logger: logger}
+	return &SessionService{
+		sessionRepo:        sessionRepo,
+		stationService:     stationService,
+		reservationService: reservationService,
+		userPkgRepo:        userPkgRepo,
+		userRepo:           userRepo,
+		reservationRepo:    reservationRepo,
+		db:                 db,
+		logger:             logger,
+	}
 }
 
 // Start 会员上机开机：优先扣时长包，不足扣余额，事务内锁定机位。
@@ -47,6 +58,15 @@ func (s *SessionService) Start(userID uint, req *dto.StartSessionReq) (*model.Se
 	}
 	if station.Status != constants.StationIdle && station.Status != constants.StationReserved {
 		return nil, util.NewAppError(constants.CodeStationBusy, "机位当前不可开机")
+	}
+	// 凭预约开机前先做逾期懒取消：逾期预约在独立事务中自动取消并释放机位。
+	if req.ReservationID > 0 {
+		if expired, err := s.reservationService.ExpireIfOverdue(req.ReservationID); err != nil {
+			return nil, err
+		} else if expired {
+			return nil, util.NewAppError(constants.CodeResvExpired,
+				fmt.Sprintf("预约 %d 已逾期未开机，系统已自动取消", req.ReservationID))
+		}
 	}
 	sess := &model.Session{
 		UserID:        userID,
@@ -64,20 +84,44 @@ func (s *SessionService) Start(userID uint, req *dto.StartSessionReq) (*model.Se
 		if locked.Status == constants.StationUsing {
 			return util.NewAppError(constants.CodeSessionOpen, "该机位已有进行中的上机记录")
 		}
-		locked.Status = constants.StationUsing
-		if err := tx.Save(locked).Error; err != nil {
-			return err
+		if locked.Status == constants.StationFault {
+			return util.NewAppError(constants.CodeStationFault, "机位当前故障，无法开机")
 		}
+		// 凭预约开机：校验归属、机位匹配与开机时间窗（起始前15分钟至结束前），逾期自动取消。
 		if req.ReservationID > 0 {
-			res, err := s.reservationRepo.FindByID(req.ReservationID)
-			if err == nil && res.Status == constants.ReservationConfirmed {
-				res.Status = constants.ReservationCheckedIn
-				if err := tx.Save(res).Error; err != nil {
-					return err
-				}
+			res, err := s.reservationRepo.LockByID(tx, req.ReservationID)
+			if err != nil {
+				return s.mapReservationFindErr(err)
+			}
+			if res.UserID != userID {
+				return util.NewAppError(constants.CodeForbidden, "该预约不属于当前会员，越权开机已拒绝")
+			}
+			if res.StationID != req.StationID {
+				return util.NewAppError(constants.CodeValidation, "预约机位与开机机位不一致")
+			}
+			if err := s.reservationService.CheckInForSession(tx, locked, res, time.Now()); err != nil {
+				return err
+			}
+			locked.Status = constants.StationUsing
+			if err := tx.Save(locked).Error; err != nil {
+				return err
+			}
+		} else {
+			// 无预约直开：当前时刻若该机位存在占用中的有效预约，则不允许抢占。
+			now := time.Now()
+			cnt, err := s.reservationRepo.CountStationConflictTx(tx, req.StationID, now, now.Add(time.Nanosecond), 0)
+			if err != nil {
+				return fmt.Errorf("session count station reservation: %w", err)
+			}
+			if cnt > 0 {
+				return util.NewAppError(constants.CodeResvConflict, "该机位当前时段已被预约，请凭预约开机或选择其他机位")
+			}
+			locked.Status = constants.StationUsing
+			if err := tx.Save(locked).Error; err != nil {
+				return err
 			}
 		}
-		return s.sessionRepo.Create(sess)
+		return s.sessionRepo.CreateTx(tx, sess)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("session start tx: %w", err)
@@ -149,20 +193,34 @@ func (s *SessionService) End(userID, sessionID uint, req *dto.EndSessionReq) (*m
 		return nil, err
 	}
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// 与预约确认/开机/改约保持相同加锁顺序：先锁机位，再锁预约，避免死锁。
+		locked, err := s.stationService.LockForUpdate(tx, sess.StationID)
+		if err != nil {
+			return err
+		}
+		// 预约开机产生的上机记录结束后，预约流转为已完成。
+		if sess.ReservationID > 0 {
+			if res, err := s.reservationRepo.LockByID(tx, sess.ReservationID); err == nil {
+				if res.Status == constants.ReservationCheckedIn {
+					res.Status = constants.ReservationCompleted
+					if err := s.reservationRepo.UpdateTx(tx, res); err != nil {
+						return fmt.Errorf("session end complete reservation: %w", err)
+					}
+				}
+			} else if !errors.Is(err, repository.ErrNotFound) {
+				return fmt.Errorf("session end reservation find: %w", err)
+			}
+		}
 		sess.EndTime = &end
 		sess.DurationMinutes = duration
 		sess.Amount = amount
 		sess.GameType = defaultGameType(req.GameType)
 		sess.Status = constants.SessionCompleted
-		if err := s.sessionRepo.Update(sess); err != nil {
-			return err
+		if err := s.sessionRepo.UpdateTx(tx, sess); err != nil {
+			return fmt.Errorf("session end update: %w", err)
 		}
-		locked, err := s.stationService.LockForUpdate(tx, sess.StationID)
-		if err != nil {
-			return err
-		}
-		locked.Status = constants.StationIdle
-		return tx.Save(locked).Error
+		// 下机后若该机位仍有待确认/已确认预约，机位回到预约态，否则空闲。
+		return reconcileStationReserved(tx, s.reservationRepo, s.sessionRepo, locked)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("session end tx: %w", err)
@@ -242,4 +300,12 @@ func defaultGameType(gameType string) string {
 		return constants.GameOther
 	}
 	return gameType
+}
+
+// mapReservationFindErr 统一映射预约查询错误。
+func (s *SessionService) mapReservationFindErr(err error) error {
+	if errors.Is(err, repository.ErrNotFound) {
+		return util.NewAppError(constants.CodeNotFound, "预约记录不存在")
+	}
+	return fmt.Errorf("session reservation find: %w", err)
 }

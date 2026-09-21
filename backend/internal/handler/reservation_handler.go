@@ -57,21 +57,41 @@ func (h *ReservationHandler) Confirm(c *gin.Context) {
 	response.OKMessage(c, constants.MsgUpdateSuccess, res)
 }
 
-// Cancel 取消预约。
+// Cancel 取消预约（会员仅可取消本人未开机预约）。
 func (h *ReservationHandler) Cancel(c *gin.Context) {
 	var idReq dto.IDReq
 	if err := c.ShouldBindUri(&idReq); err != nil {
 		response.Fail(c, 400, constants.CodeValidation, "预约 ID 无效")
 		return
 	}
-	userID, _ := c.Get("user_id")
-	uid, _ := userID.(uint)
-	res, err := h.reservationService.Cancel(idReq.ID, uid)
+	uid, role := currentUser(c)
+	res, err := h.reservationService.Cancel(idReq.ID, uid, role)
 	if err != nil {
 		h.abort(c, err)
 		return
 	}
 	response.OKMessage(c, constants.MsgUpdateSuccess, res)
+}
+
+// Reschedule 改约（先释放原时段再占用新时段）。
+func (h *ReservationHandler) Reschedule(c *gin.Context) {
+	var idReq dto.IDReq
+	if err := c.ShouldBindUri(&idReq); err != nil {
+		response.Fail(c, 400, constants.CodeValidation, "预约 ID 无效")
+		return
+	}
+	var req dto.RescheduleReservationReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 400, constants.CodeValidation, "改约参数校验失败："+err.Error())
+		return
+	}
+	uid, role := currentUser(c)
+	res, err := h.reservationService.Reschedule(idReq.ID, uid, role, &req)
+	if err != nil {
+		h.abort(c, err)
+		return
+	}
+	response.OKMessage(c, constants.MsgRescheduleOK, res)
 }
 
 // CheckIn 到店开机。
@@ -89,19 +109,37 @@ func (h *ReservationHandler) CheckIn(c *gin.Context) {
 	response.OKMessage(c, constants.MsgCheckInOK, res)
 }
 
-// List 分页查询预约。
+// List 分页查询预约（会员端自动按本人过滤，店员端可看全部，展示数据一致）。
 func (h *ReservationHandler) List(c *gin.Context) {
 	var query dto.ReservationQuery
 	if err := c.ShouldBindQuery(&query); err != nil {
 		response.Fail(c, 400, constants.CodeValidation, "预约查询参数校验失败："+err.Error())
 		return
 	}
-	list, total, err := h.reservationService.List(&query)
+	uid, role := currentUser(c)
+	list, total, err := h.reservationService.List(&query, uid, role)
 	if err != nil {
 		h.abort(c, err)
 		return
 	}
-	response.OK(c, dto.PageResult{List: list, Total: total, Page: query.Page, PageSize: query.PageSize})
+	page := query.Page
+	if page <= 0 {
+		page = constants.DefaultPage
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 {
+		pageSize = constants.DefaultPageSize
+	}
+	response.OK(c, dto.PageResult{List: list, Total: total, Page: page, PageSize: pageSize})
+}
+
+// currentUser 从上下文读取当前会员 ID 与角色。
+func currentUser(c *gin.Context) (uint, string) {
+	userID, _ := c.Get("user_id")
+	uid, _ := userID.(uint)
+	role, _ := c.Get("role")
+	roleStr, _ := role.(string)
+	return uid, roleStr
 }
 
 // abort 统一错误处理。

@@ -49,6 +49,16 @@ func (r *UserRepository) FindByID(id uint) (*model.User, error) {
 	return &u, err
 }
 
+// LockByID 事务内行锁查询会员（同一会员并发预约/改约时串行化）。
+func (r *UserRepository) LockByID(tx *gorm.DB, id uint) (*model.User, error) {
+	var u model.User
+	err := tx.Clauses(clauseLocking()).First(&u, id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return &u, err
+}
+
 // Update 更新用户。
 func (r *UserRepository) Update(u *model.User) error {
 	return r.db.Save(u).Error

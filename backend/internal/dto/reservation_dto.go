@@ -1,13 +1,19 @@
 package dto
 
-import "time"
-
 // CreateReservationReq 创建预约请求。
 type CreateReservationReq struct {
 	StationID uint      `json:"station_id" binding:"required"`
-	StartTime time.Time `json:"start_time" binding:"required"`
-	EndTime   time.Time `json:"end_time" binding:"required"`
+	StartTime LocalTime `json:"start_time" binding:"required"`
+	EndTime   LocalTime `json:"end_time" binding:"required"`
 	Remark    string    `json:"remark" binding:"omitempty,max=255"`
+}
+
+// RescheduleReservationReq 改约请求：先释放原时段再占用新时段。
+type RescheduleReservationReq struct {
+	StationID uint      `json:"station_id" binding:"omitempty"`
+	StartTime LocalTime `json:"start_time" binding:"required"`
+	EndTime   LocalTime `json:"end_time" binding:"required"`
+	Remark    *string   `json:"remark" binding:"omitempty,max=255"`
 }
 
 // ReservationQuery 预约查询参数。

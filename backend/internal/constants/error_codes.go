@@ -19,6 +19,9 @@ const (
 	CodeReservation  = 40007
 	CodeSessionOpen  = 40008
 	CodeTournament   = 40009
+	CodeResvConflict = 40010 // 机位/会员时段冲突
+	CodeResvExpired  = 40011 // 预约逾期未开机
+	CodeResvWindow   = 40012 // 不在开机时间窗内
 )
 
 // 错误码与默认文案映射。
@@ -40,4 +43,7 @@ var ErrorMessages = map[int]string{
 	CodeReservation:  "预约状态不允许该操作",
 	CodeSessionOpen:  "该机位已有进行中的上机记录",
 	CodeTournament:   "赛事状态不允许该操作",
+	CodeResvConflict: "预约时段冲突，请更换机位或时段",
+	CodeResvExpired:  "预约已逾期未开机，系统已自动取消",
+	CodeResvWindow:   "仅可在开始前15分钟至结束前开机",
 }

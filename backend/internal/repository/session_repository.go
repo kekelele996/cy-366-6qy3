@@ -24,6 +24,25 @@ func (r *SessionRepository) Create(s *model.Session) error {
 	return r.db.Create(s).Error
 }
 
+// CreateTx 事务内创建上机记录。
+func (r *SessionRepository) CreateTx(tx *gorm.DB, s *model.Session) error {
+	return tx.Create(s).Error
+}
+
+// UpdateTx 事务内更新上机记录。
+func (r *SessionRepository) UpdateTx(tx *gorm.DB, s *model.Session) error {
+	return tx.Save(s).Error
+}
+
+// CountActiveByStationTx 事务内统计机位进行中的上机记录数。
+func (r *SessionRepository) CountActiveByStationTx(tx *gorm.DB, stationID uint) (int64, error) {
+	var cnt int64
+	err := tx.Model(&model.Session{}).
+		Where("station_id = ? AND status = ?", stationID, "active").
+		Count(&cnt).Error
+	return cnt, err
+}
+
 // FindByID 查询上机记录。
 func (r *SessionRepository) FindByID(id uint) (*model.Session, error) {
 	var s model.Session

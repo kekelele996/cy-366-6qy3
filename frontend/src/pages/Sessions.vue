@@ -4,6 +4,7 @@
       <van-tab title="上机记录" name="list">
         <van-cell-group inset title="上机/下机操作">
           <van-field v-model="startForm.station_id" type="number" label="机位ID" placeholder="输入机位ID" />
+          <van-field v-model="startForm.reservation_id" type="number" label="预约ID" placeholder="凭预约开机时填写（开始前15分钟内）" />
           <van-field v-model="startForm.game_type" label="游戏类型" placeholder="lol/csgo/kog/other" />
         </van-cell-group>
         <div class="submit-btn"><van-button round block type="primary" @click="start">开机上机</van-button></div>
@@ -51,7 +52,7 @@ const periodOptions = [
   { text: '近30天', value: 'month' },
   { text: '近1天', value: 'day' },
 ]
-const startForm = ref({ station_id: '', game_type: 'other' })
+const startForm = ref({ station_id: '', reservation_id: '', game_type: 'other' })
 
 async function load() {
   const data = await listSessions({ page: page.value, page_size: pageSize })
@@ -69,9 +70,14 @@ async function start() {
     showToast('请输入机位ID')
     return
   }
-  const s = await startSession({ station_id: stationId, game_type: startForm.value.game_type || 'other' })
+  const reservationId = Number(startForm.value.reservation_id)
+  const s = await startSession({
+    station_id: stationId,
+    reservation_id: reservationId || undefined,
+    game_type: startForm.value.game_type || 'other',
+  })
   showSuccessToast(`开机成功，上机记录 #${s.id}`)
-  startForm.value = { station_id: '', game_type: 'other' }
+  startForm.value = { station_id: '', reservation_id: '', game_type: 'other' }
   load()
 }
 

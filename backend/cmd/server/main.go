@@ -62,11 +62,14 @@ func main() {
 	stationService := service.NewStationService(stationRepo, logger)
 	packageService := service.NewTimePackageService(packageRepo, logger)
 	rechargeService := service.NewRechargeService(userRepo, rechargeRepo, packageRepo, userPkgRepo, orderRepo, logger)
-	reservationService := service.NewReservationService(reservationRepo, stationService, db, logger)
-	sessionService := service.NewSessionService(sessionRepo, stationService, userPkgRepo, userRepo, reservationRepo, db, logger)
+	reservationService := service.NewReservationService(reservationRepo, sessionRepo, userRepo, stationService, db, logger)
+	sessionService := service.NewSessionService(sessionRepo, stationService, reservationService, userPkgRepo, userRepo, reservationRepo, db, logger)
 	tournamentService := service.NewTournamentService(tournamentRepo, teamRepo, regRepo, matchRepo, db, logger)
 	auditService := service.NewAuditService(auditRepo, logger)
 	dashboardService := service.NewDashboardService(db, logger)
+
+	// 逾期未开机的待确认/已确认预约自动取消，并释放机位占用。
+	reservationService.StartExpiredSweeper(30 * time.Second)
 
 	// 处理器层
 	authHandler := handler.NewAuthHandler(authService, userService, logger)

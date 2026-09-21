@@ -152,11 +152,12 @@ docker compose up -d --build
 
 | 方法 | 路径 | 说明 | 权限 |
 | --- | --- | --- | --- |
-| GET | /reservations | 预约分页列表 | 登录 |
-| POST | /reservations | 创建预约 | 登录 |
-| POST | /reservations/:id/confirm | 确认预约 | admin/staff |
-| POST | /reservations/:id/cancel | 取消预约 | 登录 |
-| POST | /reservations/:id/checkin | 到店开机 | admin/staff |
+| GET | /reservations | 预约分页列表（会员仅返回本人，店员/管理员返回全部） | 登录 |
+| POST | /reservations | 创建预约（进入待确认，占用机位与会员时段） | 登录 |
+| POST | /reservations/:id/confirm | 确认预约（仅待确认→已确认，并发仅生效一次） | admin/staff |
+| POST | /reservations/:id/cancel | 取消预约（会员仅可取消本人未开机预约，店员可取消任意） | 登录 |
+| PUT | /reservations/:id/reschedule | 改约（先释放原时段再占用新时段，失败整体回滚） | 登录 |
+| POST | /reservations/:id/checkin | 到店开机（起始前15分钟至结束前，逾期自动取消） | admin/staff |
 
 ### 上机记录
 
@@ -305,6 +306,15 @@ npm run build
 | 前端 | `frontend/src/constants/index.ts`（GAME_TYPE/TEXT、PAYMENT_METHOD/TEXT）、`frontend/src/pages/Sessions.vue`、`frontend/src/pages/Recharge.vue`、`frontend/src/pages/Tournaments.vue` |
 
 ## 设计说明
+
+### 机位预约准入闭环
+
+- **时段唯一**：同一机位在 `[start,end)` 区间内只允许一条 `pending/confirmed/checked_in` 预约；同一会员也不得在重叠时段持有多条有效预约（待确认同样占位）。冲突校验在事务内、会员行锁 + 机位 `SELECT ... FOR UPDATE` 之后执行，避免并发下双写。
+- **开机窗口**：`confirmed` 预约仅可在「开始前 15 分钟 ≤ 现在 < 结束时间」内开机；超过结束时间仍未开机的待确认/已确认预约由后台扫描任务（每 30 秒）自动取消并释放机位，开机动作本身也会懒触发逾期取消。
+- **改约语义**：`PUT /reservations/:id/reschedule` 在单事务内按「会员 → 原机位 → 新机位 → 预约」固定顺序加锁，冲突统计排除自身（等价于先释放原时段），任一步冲突、越权或写库失败均整体回滚，原预约与机位状态保持不变；改约后回到 `pending` 等待重新确认。
+- **并发一次生效**：确认、开机、改约均通过预约行锁 + 状态守卫（CAS 语义的状态判断）保证重复点击/并发请求只有一次生效。
+- **越权防护**：会员仅能查看/取消/改约本人的未开机预约；已开机预约只允许店员取消。
+- **机位状态收敛**：取消、逾期清理、下机后统一按「进行中上机 → using；仍有有效预约 → reserved；均无 → idle；故障 → fault 保持」重算机位，会员端与店员端共用同一接口数据，展示一致。
 
 - 分层依赖严格单向：handler → service → repository → model，构造器注入，无反向引用。
 - 多步写操作均放入 service 事务（`gorm.DB.Transaction`）；并发场景使用 `SELECT ... FOR UPDATE`（`repository/common.go` 的 `clauseLocking`），如余额扣减、机位状态流转、预约冲突校验。
