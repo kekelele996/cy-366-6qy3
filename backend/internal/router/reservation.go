@@ -16,6 +16,7 @@ func RegisterReservation(rg *gin.RouterGroup, h *handler.ReservationHandler, jwt
 		reservations.POST("", h.Create)
 		reservations.POST("/:id/confirm", middleware.RBAC(constants.RoleAdmin, constants.RoleStaff), h.Confirm)
 		reservations.POST("/:id/cancel", h.Cancel)
+		reservations.POST("/:id/reschedule", h.Reschedule)
 		reservations.POST("/:id/checkin", middleware.RBAC(constants.RoleAdmin, constants.RoleStaff), h.CheckIn)
 	}
 }

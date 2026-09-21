@@ -48,6 +48,29 @@ func (s *SessionService) Start(userID uint, req *dto.StartSessionReq) (*model.Se
 	if station.Status != constants.StationIdle && station.Status != constants.StationReserved {
 		return nil, util.NewAppError(constants.CodeStationBusy, "机位当前不可开机")
 	}
+	// 关联预约的开机同样受准入闭环约束：本人、已确认、在 [起始前15分钟, 结束) 时间窗内。
+	var linked *model.Reservation
+	if req.ReservationID > 0 {
+		linked, err = s.reservationRepo.FindByID(req.ReservationID)
+		if err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return nil, util.NewAppError(constants.CodeNotFound, "关联的预约记录不存在")
+			}
+			return nil, fmt.Errorf("session start reservation find: %w", err)
+		}
+		if linked.StationID != req.StationID {
+			return nil, util.NewAppError(constants.CodeReservation, "预约机位与开机机位不一致，无法使用该预约开机")
+		}
+		if linked.UserID != userID {
+			return nil, util.NewAppError(constants.CodeForbidden, "仅可使用本人的预约开机")
+		}
+		if linked.Status != constants.ReservationConfirmed {
+			return nil, util.NewAppError(constants.CodeReservation, "仅已确认的预约可以开机")
+		}
+		if _, _, err := checkInWindow(linked, time.Now()); err != nil {
+			return nil, err
+		}
+	}
 	sess := &model.Session{
 		UserID:        userID,
 		StationID:     req.StationID,
@@ -57,6 +80,30 @@ func (s *SessionService) Start(userID uint, req *dto.StartSessionReq) (*model.Se
 		Status:        constants.SessionActive,
 	}
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// 与 ReservationService.CheckIn 保持一致的加锁顺序：先预约行、后机位行，避免交叉死锁。
+		var lockedRes *model.Reservation
+		if linked != nil {
+			lr, lerr := s.reservationRepo.LockByID(tx, req.ReservationID)
+			if lerr != nil {
+				if errors.Is(lerr, repository.ErrNotFound) {
+					return util.NewAppError(constants.CodeNotFound, "关联的预约记录不存在")
+				}
+				return lerr
+			}
+			if lr.UserID != userID {
+				return util.NewAppError(constants.CodeForbidden, "仅可使用本人的预约开机")
+			}
+			if lr.StationID != req.StationID {
+				return util.NewAppError(constants.CodeReservation, "预约机位与开机机位不一致，无法使用该预约开机")
+			}
+			if lr.Status != constants.ReservationConfirmed {
+				return util.NewAppError(constants.CodeReservation, "仅已确认的预约可以开机")
+			}
+			if _, _, lerr := checkInWindow(lr, time.Now()); lerr != nil {
+				return lerr
+			}
+			lockedRes = lr
+		}
 		locked, err := s.stationService.LockForUpdate(tx, req.StationID)
 		if err != nil {
 			return err
@@ -64,22 +111,28 @@ func (s *SessionService) Start(userID uint, req *dto.StartSessionReq) (*model.Se
 		if locked.Status == constants.StationUsing {
 			return util.NewAppError(constants.CodeSessionOpen, "该机位已有进行中的上机记录")
 		}
+		if lockedRes != nil {
+			// 条件更新：与预约 CheckIn 并发时只允许一次开机生效。
+			affected, err := s.reservationRepo.UpdateStatusIfCurrentTx(tx, req.ReservationID,
+				[]string{constants.ReservationConfirmed}, constants.ReservationCheckedIn)
+			if err != nil {
+				return err
+			}
+			if affected == 0 {
+				return util.NewAppError(constants.CodeConflict, "预约状态已变更，开机未生效，请刷新后重试")
+			}
+		}
 		locked.Status = constants.StationUsing
 		if err := tx.Save(locked).Error; err != nil {
 			return err
 		}
-		if req.ReservationID > 0 {
-			res, err := s.reservationRepo.FindByID(req.ReservationID)
-			if err == nil && res.Status == constants.ReservationConfirmed {
-				res.Status = constants.ReservationCheckedIn
-				if err := tx.Save(res).Error; err != nil {
-					return err
-				}
-			}
-		}
-		return s.sessionRepo.Create(sess)
+		return s.sessionRepo.CreateTx(tx, sess)
 	})
 	if err != nil {
+		var appErr *util.AppError
+		if errors.As(err, &appErr) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("session start tx: %w", err)
 	}
 	s.logger.Info(fmt.Sprintf(constants.LogTemplates["session_start_ok"], userID, req.StationID, sess.ID))

@@ -71,6 +71,16 @@ func (r *UserRepository) List(page, pageSize int) ([]model.User, int64, error) {
 	return users, total, err
 }
 
+// LockByID 事务内行锁查询用户（并发预约占用会员时段时使用 SELECT ... FOR UPDATE）。
+func (r *UserRepository) LockByID(tx *gorm.DB, id uint) (*model.User, error) {
+	var u model.User
+	err := tx.Clauses(clauseLocking()).First(&u, id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	return &u, err
+}
+
 // UpdateBalance 更新余额（扣款时校验余额充足）。
 func (r *UserRepository) UpdateBalance(userID uint, delta float64) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {

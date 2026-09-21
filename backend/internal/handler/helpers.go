@@ -17,6 +17,7 @@ func httpStatusFor(code int) int {
 		return 400
 	case constants.CodeConflict, constants.CodeUserExists, constants.CodeStationBusy,
 		constants.CodeStationFault, constants.CodeInsufficient, constants.CodeReservation,
+		constants.CodeReservationTime, constants.CodeReservationExpired,
 		constants.CodeSessionOpen, constants.CodeTournament:
 		return 409
 	default:

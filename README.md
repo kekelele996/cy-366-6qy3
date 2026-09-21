@@ -152,11 +152,20 @@ docker compose up -d --build
 
 | 方法 | 路径 | 说明 | 权限 |
 | --- | --- | --- | --- |
-| GET | /reservations | 预约分页列表 | 登录 |
-| POST | /reservations | 创建预约 | 登录 |
-| POST | /reservations/:id/confirm | 确认预约 | admin/staff |
-| POST | /reservations/:id/cancel | 取消预约 | 登录 |
-| POST | /reservations/:id/checkin | 到店开机 | admin/staff |
+| GET | /reservations | 预约分页列表（会员端仅返回本人预约，店员端返回全部，数据源一致） | 登录 |
+| POST | /reservations | 创建预约（待确认，同机位/同会员时段重叠均拒绝） | 登录 |
+| POST | /reservations/:id/confirm | 确认预约（并发确认仅一次生效） | admin/staff |
+| POST | /reservations/:id/cancel | 取消预约（会员仅本人，店员可取消任意）并释放机位 | 登录 |
+| POST | /reservations/:id/reschedule | 改约：先释放原时段再占用新时段，冲突/越权/写入失败时整体回滚 | 登录 |
+| POST | /reservations/:id/checkin | 到店开机（仅起始前 15 分钟至结束前；逾期当场自动取消） | admin/staff |
+
+预约准入闭环规则：
+
+1. 同一机位时段重叠的待确认（pending）/已确认（confirmed）/已开机（checked_in）预约不能共存；同一会员跨机位也不能占用重叠时段（半开区间 `[start,end)`，首尾相接不算重叠）。
+2. 会员创建预约为待确认，店员确认后变为已确认；仅已确认预约可开机，开机窗口为 `start_time - 15 分钟 ≤ now < end_time`。
+3. 超过 `end_time` 仍未开机的预约自动取消并释放机位：后端每分钟定时扫描，店员在到店开机/确认时也会当场触发自动取消。
+4. 改约在同一数据库事务内“先释放原时段、再占用新时段”：任一步冲突、越权或写入失败均整体回滚，原预约与机位状态不变。
+5. 并发确认/开机/改约通过 `SELECT ... FOR UPDATE` 行锁 + 条件更新（`UPDATE ... WHERE status IN (...)`，受影响行数为 0 即判定已被并发处理）保证只生效一次。
 
 ### 上机记录
 
@@ -280,7 +289,7 @@ npm run build
 
 | 端 | 文件 |
 | --- | --- |
-| 后端 | `backend/internal/constants/enums.go`（定义）、`backend/internal/model/reservation.go`、`backend/internal/dto/reservation_dto.go`（oneof 校验）、`backend/internal/service/reservation_service.go`（状态机 Confirm/Cancel/CheckIn）、`backend/internal/util/formatters.go`（StatusText）、`backend/internal/constants/error_codes.go`（CodeReservation）、`backend/internal/constants/log_templates.go`（reservation_* 模板）、`backend/internal/repository/reservation_repository.go`（CountConflict 状态集合） |
+| 后端 | `backend/internal/constants/enums.go`（定义、`ReservationBlockingStatus` 占用态集合、`CheckInLeadMinutes=15`）、`backend/internal/model/reservation.go`、`backend/internal/dto/reservation_dto.go`（oneof 校验、改约 DTO）、`backend/internal/service/reservation_service.go`（状态机 Create/Confirm/Cancel/CheckIn/Reschedule/AutoCancelOverdue、`checkInWindow` 开机窗口）、`backend/internal/util/formatters.go`（StatusText）、`backend/internal/constants/error_codes.go`（CodeReservation/CodeReservationTime/CodeReservationExpired）、`backend/internal/constants/log_templates.go`（reservation_* 模板）、`backend/internal/repository/reservation_repository.go`（CountConflict/CountUserConflictTx 冲突状态集合、UpdateStatusIfCurrentTx 条件更新）、`backend/internal/handler/reservation_handler.go`（越权拦截）、`backend/internal/router/reservation.go`、`backend/cmd/server/main.go`（逾期自动取消定时任务） |
 | 前端 | `frontend/src/constants/index.ts`（RESERVATION_STATUS/TEXT/TYPE）、`frontend/src/components/StatusBadge.vue`、`frontend/src/pages/Reservations.vue`（筛选与操作按钮显隐） |
 
 ### 赛事状态（draft / open / ready / finished）
@@ -307,7 +316,7 @@ npm run build
 ## 设计说明
 
 - 分层依赖严格单向：handler → service → repository → model，构造器注入，无反向引用。
-- 多步写操作均放入 service 事务（`gorm.DB.Transaction`）；并发场景使用 `SELECT ... FOR UPDATE`（`repository/common.go` 的 `clauseLocking`），如余额扣减、机位状态流转、预约冲突校验。
+- 多步写操作均放入 service 事务（`gorm.DB.Transaction`）；并发场景使用 `SELECT ... FOR UPDATE`（`repository/common.go` 的 `clauseLocking`），如余额扣减、机位状态流转、预约冲突校验、并发确认/开机/改约（行锁 + `UPDATE ... WHERE status IN (...)` 条件更新，受影响行数 0 即拒绝重复生效）。
 - 横切关注点：JWT + RBAC（`middleware/auth.go`、`middleware/rbac.go`、`util/jwt.go`）、操作审计（`middleware/audit.go` + `audit_logs` 表 + 审计页面）、全局错误处理与请求追踪（`middleware/request_id.go`、`middleware/error_handler.go`、`util/app_error.go`、`constants/error_codes.go`）。
 - 共享组件：`StatusBadge`、`EmptyState`、`DataTable`、`ConfirmDialog`；共享 hooks/utils：`useAuth`、`usePagination`、`request.ts`、`format.ts`。
 - 严禁合并职责到单一文件：每个实体按 model / dto / repository / service / handler / router / constants 拆分，前端按 api / stores / pages / components 拆分。

@@ -32,6 +32,12 @@ const (
 // AllReservationStatus 所有预约状态。
 var AllReservationStatus = []string{ReservationPending, ReservationConfirmed, ReservationCheckedIn, ReservationCompleted, ReservationCancelled}
 
+// ReservationBlockingStatus 占用机位/会员时段的预约状态：待确认、已确认与已开机的预约均参与时段冲突判定。
+var ReservationBlockingStatus = []string{ReservationPending, ReservationConfirmed, ReservationCheckedIn}
+
+// CheckInLeadMinutes 允许提前开机的分钟数：起始前 15 分钟起可开机。
+const CheckInLeadMinutes = 15
+
 // IsValidReservationStatus 判断预约状态是否合法。
 func IsValidReservationStatus(s string) bool {
 	switch s {

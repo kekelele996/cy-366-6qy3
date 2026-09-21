@@ -29,3 +29,11 @@ export function cancelReservation(id: number) {
 export function checkInReservation(id: number) {
   return post<Reservation>(`/reservations/${id}/checkin`)
 }
+
+// 改约：服务端先释放原时段再占用新时段，冲突或越权时原预约与机位状态不变。
+export function rescheduleReservation(
+  id: number,
+  data: { station_id?: number; start_time: string; end_time: string; remark?: string },
+) {
+  return post<Reservation>(`/reservations/${id}/reschedule`, data)
+}

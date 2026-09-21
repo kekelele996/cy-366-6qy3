@@ -24,6 +24,11 @@ func (r *SessionRepository) Create(s *model.Session) error {
 	return r.db.Create(s).Error
 }
 
+// CreateTx 在事务内创建上机记录。
+func (r *SessionRepository) CreateTx(tx *gorm.DB, s *model.Session) error {
+	return tx.Create(s).Error
+}
+
 // FindByID 查询上机记录。
 func (r *SessionRepository) FindByID(id uint) (*model.Session, error) {
 	var s model.Session

@@ -11,7 +11,7 @@ import (
 
 func newMockDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	if err != nil {
 		t.Fatalf("sqlmock new error: %v", err)
 	}

@@ -62,7 +62,7 @@ func main() {
 	stationService := service.NewStationService(stationRepo, logger)
 	packageService := service.NewTimePackageService(packageRepo, logger)
 	rechargeService := service.NewRechargeService(userRepo, rechargeRepo, packageRepo, userPkgRepo, orderRepo, logger)
-	reservationService := service.NewReservationService(reservationRepo, stationService, db, logger)
+	reservationService := service.NewReservationService(reservationRepo, userRepo, stationService, db, logger)
 	sessionService := service.NewSessionService(sessionRepo, stationService, userPkgRepo, userRepo, reservationRepo, db, logger)
 	tournamentService := service.NewTournamentService(tournamentRepo, teamRepo, regRepo, matchRepo, db, logger)
 	auditService := service.NewAuditService(auditRepo, logger)
@@ -84,6 +84,11 @@ func main() {
 	go hub.Run()
 	go broadcastStations(hub, db, logger)
 	wsHandler := handler.NewWSHandler(hub, logger)
+
+	// 预约逾期自动取消：周期性把已过结束时间仍未开机的预约置为取消并释放机位。
+	expireCtx, stopExpireSweeper := context.WithCancel(context.Background())
+	defer stopExpireSweeper()
+	go runReservationExpireSweeper(expireCtx, reservationService, logger)
 
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
@@ -134,6 +139,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	logger.Info("shutting down server")
+	stopExpireSweeper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
@@ -158,5 +164,38 @@ func broadcastStations(hub *handler.StationHub, db *gorm.DB, logger *slog.Logger
 			continue
 		}
 		hub.Publish(payload)
+	}
+}
+
+// runReservationExpireSweeper 预约逾期自动取消定时任务。
+func runReservationExpireSweeper(ctx context.Context, svc *service.ReservationService, logger *slog.Logger) {
+	// 启动后先等半个周期，避免与启动流量叠加；随后每分钟扫描一次。
+	initial := time.NewTimer(30 * time.Second)
+	select {
+	case <-ctx.Done():
+		initial.Stop()
+		return
+	case <-initial.C:
+	}
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	sweep := func() {
+		cancelled, err := svc.AutoCancelOverdue(ctx)
+		if err != nil {
+			logger.Warn("reservation expire sweep failed", "err", err)
+			return
+		}
+		if cancelled > 0 {
+			logger.Info("reservation expire sweep released", "cancelled", cancelled)
+		}
+	}
+	sweep()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
 	}
 }
